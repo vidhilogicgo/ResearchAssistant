@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -152,7 +153,10 @@ def retrieve_context(session_id: str, query: str, documents: List[Document], use
     vectorstore = build_vectorstore(session_id, documents)
     if vectorstore is None:
         return ""
-    matches = vectorstore.similarity_search(query, k=5)
+    item_count = vectorstore._collection.count()
+    if item_count == 0:
+        return ""
+    matches = vectorstore.similarity_search(query, k=min(5, item_count))
     return "\n\n".join(
         f"Source: {doc.metadata.get('source', 'uploaded document')}\n{doc.page_content}"
         for doc in matches
@@ -229,33 +233,31 @@ def researcher_agent(state: ResearchState) -> ResearchState:
 
 
 def writer_agent(state: ResearchState) -> ResearchState:
-    append_progress(state, "Writer Agent: drafting final answer only.")
+    append_progress(state, "Writer Agent: drafting concise bullet response.")
     prompt = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                "You write the final answer only. Do not write an essay, report, title, "
-                "executive summary, introduction, methodology, conclusion, or filler. "
-                "Use this exact structure:\n"
-                "**Final Answer**\n"
-                "- One directly relevant point per bullet.\n"
-                "- Keep each bullet short and factual.\n"
-                "- Include only the most important information needed to answer the query.\n"
-                "- Add source URLs inline only when they directly support a bullet.\n"
-                "Limit the answer to 5-8 bullets unless the user asks for more.",
+                "Write only the direct response. Do not write a title, heading, executive summary, "
+                "methodology, conclusion, or generic filler. The answer may be a short paragraph, "
+                "a compact bullet list, or a mix of both depending on what best fits the query. "
+                "Keep it concise and include only relevant information. Add source URLs inline "
+                "only when they directly support a specific point. Avoid unnecessary pointwise "
+                "formatting when a natural paragraph is clearer.",
             ),
             (
                 "human",
-                "Query:\n{query}\n\nPlan:\n{plan}\n\nInsights:\n{insights}\n\nSources:\n{sources}",
+                "Query:\n{query}\n\nPlan:\n{plan}\n\nInsights:\n{insights}\n\nSources:\n{sources}\n\nAdditional writing instruction:\n{rewrite_instruction}",
             ),
         ]
     )
-    state["report"] = (prompt | get_llm(temperature=0.2)).invoke(
+    state["report"] = (prompt | get_llm(temperature=float(state.get("writer_temperature", 0.2)))).invoke(
         {
             "query": state["query"],
             "plan": state["plan"],
             "insights": state["insights"],
             "sources": "\n\n".join(state.get("search_results", [])),
+            "rewrite_instruction": state.get("rewrite_instruction", "Write the best concise answer."),
         }
     ).content
     return state
@@ -298,6 +300,19 @@ def build_graph():
     return graph.compile()
 
 
+
+def regenerate_answer(state: ResearchState) -> ResearchState:
+    """Regenerate only the user-facing answer from existing research context."""
+    state = dict(state)
+    state["writer_temperature"] = 0.55
+    state["rewrite_instruction"] = (
+        "Regenerate the answer using the same research evidence. Phrase it freshly, "
+        "keep it concise, and do not add unsupported facts."
+    )
+    append_progress(state, "Writer Agent: regenerating answer from existing research.")
+    state = writer_agent(state)
+    state = evaluator_agent(state)
+    return state
 def run_research(
     query: str,
     documents: Optional[List[Document]] = None,
@@ -409,24 +424,19 @@ def render_streamlit_app() -> None:
 
     state = st.session_state.get("last_result")
     if state:
-        st.subheader("Final Answer")
+        if st.button("Regenerate answer", use_container_width=True):
+            if not os.getenv("GROQ_API_KEY"):
+                st.error("Missing GROQ_API_KEY. Add it to your .env file or deployment secrets.")
+            else:
+                with st.status("Regenerating answer from existing research...", expanded=True) as regen_status:
+                    try:
+                        state = regenerate_answer(state)
+                        st.session_state["last_result"] = state
+                        regen_status.update(label="Answer regenerated.", state="complete")
+                    except Exception as exc:
+                        regen_status.update(label="Regeneration failed.", state="error")
+                        st.exception(exc)
         st.markdown(state.get("report", ""))
-
-        tabs = st.tabs(["Plan", "Insights", "Evaluation", "Sources", "Raw JSON"])
-        with tabs[0]:
-            st.markdown(state.get("plan", ""))
-        with tabs[1]:
-            st.markdown(state.get("insights", ""))
-        with tabs[2]:
-            st.markdown(state.get("evaluation", ""))
-            if state.get("errors"):
-                st.warning("\n".join(state["errors"]))
-        with tabs[3]:
-            for source in state.get("search_results", []):
-                st.write(source)
-        with tabs[4]:
-            safe_state = {k: v for k, v in state.items() if k != "documents"}
-            st.code(json.dumps(safe_state, indent=2, default=str), language="json")
 
 
 if __name__ == "__main__":
