@@ -42,7 +42,6 @@ The implementation is intentionally compressed into `app.py`. Supporting files a
 +-- requirements.txt        # Python dependencies
 +-- .env.example            # Example environment variables
 +-- render.yaml             # Render deployment config for FastAPI
-+-- CODE_DOCUMENTATION.md   # Function-by-function code documentation
 +-- CONTRIBUTING.md         # Contribution guidelines
 +-- LICENSE                 # MIT license
 +-- .gitignore              # Files excluded from GitHub
@@ -159,10 +158,6 @@ uvicorn app:api_app --host 0.0.0.0 --port $PORT
 ```
 
 Add `GROQ_API_KEY` as a Render environment variable.
-
-## Documentation
-
-See `CODE_DOCUMENTATION.md` for a function-by-function explanation of how `app.py` produces the final answer.
 
 ## GitHub Push Commands
 
